@@ -1,61 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Search, Package, AlertTriangle, TrendingDown, Edit, Trash2, Eye, ShoppingCart, History, Minus, Lock, User, LogOut } from 'lucide-react';
+import { auth, db } from './firebase_file';
 import './App.css';
 
-// Données d'exemple
-const initialProducts = [
-  {
-    id: 1,
-    name: "Rouge à Lèvres Mat",
-    category: "Maquillage",
-    brand: "Glamour Pro",
-    stock: 5,
-    minStock: 10,
-    price: 25.99,
-    sku: "RAL001",
-    description: "Rouge à lèvres longue tenue"
-  },
-  {
-    id: 2,
-    name: "Crème Hydratante Visage",
-    category: "Soins",
-    brand: "Beauty Care",
-    stock: 2,
-    minStock: 8,
-    price: 45.50,
-    sku: "CHV002",
-    description: "Crème anti-âge pour tous types de peau"
-  },
-  {
-    id: 3,
-    name: "Mascara Volume",
-    category: "Maquillage",
-    brand: "Eye Perfect",
-    stock: 15,
-    minStock: 12,
-    price: 18.90,
-    sku: "MV003",
-    description: "Mascara effet volume intense"
-  },
-  {
-    id: 4,
-    name: "Sérum Vitamine C",
-    category: "Soins",
-    brand: "Vitamin Plus",
-    stock: 0,
-    minStock: 5,
-    price: 65.00,
-    sku: "SVC004",
-    description: "Sérum concentré en vitamine C"
-  }
-];
-
 function App() {
-  const [products, setProducts] = useState(initialProducts);
+  const [products, setProducts] = useState([]);
   const [sales, setSales] = useState([]);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [loginData, setLoginData] = useState({
-    username: '',
+    email: '',
     password: ''
   });
   const [loginError, setLoginError] = useState('');
@@ -87,38 +42,74 @@ function App() {
 
   const categories = [...new Set(products.map(p => p.category))];
 
-  // Données de connexion (en production, cela devrait être géré côté serveur)
-  const validCredentials = {
-    username: 'admin',
-    password: 'cosmestock2024'
+  // Vérifier l'état d'authentification au chargement
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        setUser(user);
+        setIsAuthenticated(true);
+        loadProducts();
+        loadSales();
+      } else {
+        setUser(null);
+        setIsAuthenticated(false);
+        setProducts([]);
+        setSales([]);
+      }
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Charger les produits depuis Firestore
+  const loadProducts = async () => {
+    try {
+      const snapshot = await db.collection('d_products').get();
+      const productsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setProducts(productsData);
+    } catch (error) {
+      console.error('Erreur lors du chargement des produits:', error);
+    }
   };
 
-  // Vérifier si l'utilisateur est déjà connecté au chargement
-  useEffect(() => {
-    const savedAuth = localStorage.getItem('cosmestock_auth');
-    if (savedAuth === 'true') {
-      setIsAuthenticated(true);
+  // Charger les ventes depuis Firestore
+  const loadSales = async () => {
+    try {
+      const snapshot = await db.collection('d_sales').orderBy('date', 'desc').get();
+      const salesData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setSales(salesData);
+    } catch (error) {
+      console.error('Erreur lors du chargement des ventes:', error);
     }
-  }, []);
+  };
 
   const handleLogin = (e) => {
     e.preventDefault();
     setLoginError('');
+    setLoading(true);
 
-    if (loginData.username === validCredentials.username && 
-        loginData.password === validCredentials.password) {
-      setIsAuthenticated(true);
-      localStorage.setItem('cosmestock_auth', 'true');
-      setLoginData({ username: '', password: '' });
-    } else {
-      setLoginError('Nom d\'utilisateur ou mot de passe incorrect');
-    }
+    auth.signInWithEmailAndPassword(loginData.email, loginData.password)
+      .then((userCredential) => {
+        setLoginData({ email: '', password: '' });
+        setLoading(false);
+      })
+      .catch((error) => {
+        setLoginError('Email ou mot de passe incorrect');
+        setLoading(false);
+      });
   };
 
   const handleLogout = () => {
-    setIsAuthenticated(false);
-    localStorage.removeItem('cosmestock_auth');
-    setCurrentView('dashboard');
+    auth.signOut().then(() => {
+      setCurrentView('dashboard');
+    });
   };
 
   const getStockStatus = (product) => {
@@ -155,27 +146,32 @@ function App() {
     return matchesSearch && matchesCategory && matchesStockLevel;
   });
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     
-    if (editingProduct) {
-      setProducts(products.map(p => 
-        p.id === editingProduct.id 
-          ? { ...formData, id: editingProduct.id, stock: parseInt(formData.stock), minStock: parseInt(formData.minStock), price: parseFloat(formData.price) }
-          : p
-      ));
-    } else {
-      const newProduct = {
+    try {
+      const productData = {
         ...formData,
-        id: Date.now(),
         stock: parseInt(formData.stock),
         minStock: parseInt(formData.minStock),
-        price: parseFloat(formData.price)
+        price: parseFloat(formData.price),
+        userId: user.uid,
+        updatedAt: new Date()
       };
-      setProducts([...products, newProduct]);
+
+      if (editingProduct) {
+        await db.collection('d_products').doc(editingProduct.id).update(productData);
+      } else {
+        productData.createdAt = new Date();
+        await db.collection('d_products').add(productData);
+      }
+      
+      loadProducts();
+      resetForm();
+    } catch (error) {
+      console.error('Erreur lors de la sauvegarde:', error);
+      alert('Erreur lors de la sauvegarde du produit');
     }
-    
-    resetForm();
   };
 
   const handleEdit = (product) => {
@@ -184,9 +180,15 @@ function App() {
     setShowModal(true);
   };
 
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
     if (window.confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) {
-      setProducts(products.filter(p => p.id !== id));
+      try {
+        await db.collection('d_products').doc(id).delete();
+        loadProducts();
+      } catch (error) {
+        console.error('Erreur lors de la suppression:', error);
+        alert('Erreur lors de la suppression du produit');
+      }
     }
   };
 
@@ -215,7 +217,7 @@ function App() {
     setShowSaleModal(true);
   };
 
-  const handleSaleSubmit = (e) => {
+  const handleSaleSubmit = async (e) => {
     e.preventDefault();
     
     const quantity = parseInt(saleData.quantity);
@@ -225,38 +227,41 @@ function App() {
       return;
     }
 
-    // Créer l'enregistrement de vente
-    const newSale = {
-      id: Date.now(),
-      productId: selectedProductForSale.id,
-      productName: selectedProductForSale.name,
-      productSku: selectedProductForSale.sku,
-      quantity: quantity,
-      unitPrice: selectedProductForSale.price,
-      totalPrice: quantity * selectedProductForSale.price,
-      customerName: saleData.customerName,
-      notes: saleData.notes,
-      date: new Date().toISOString()
-    };
+    try {
+      // Créer l'enregistrement de vente
+      const saleRecord = {
+        productId: selectedProductForSale.id,
+        productName: selectedProductForSale.name,
+        productSku: selectedProductForSale.sku,
+        quantity: quantity,
+        unitPrice: selectedProductForSale.price,
+        totalPrice: quantity * selectedProductForSale.price,
+        customerName: saleData.customerName,
+        notes: saleData.notes,
+        date: new Date(),
+        userId: user.uid
+      };
 
-    // Mettre à jour le stock du produit
-    setProducts(products.map(p => 
-      p.id === selectedProductForSale.id 
-        ? { ...p, stock: p.stock - quantity }
-        : p
-    ));
+      // Ajouter la vente à Firestore
+      await db.collection('d_sales').add(saleRecord);
 
-    // Ajouter la vente à l'historique
-    setSales([newSale, ...sales]);
+      // Mettre à jour le stock du produit
+      const newStock = selectedProductForSale.stock - quantity;
+      await db.collection('d_products').doc(selectedProductForSale.id).update({
+        stock: newStock,
+        updatedAt: new Date()
+      });
 
-    // Réinitialiser le formulaire
-    setShowSaleModal(false);
-    setSelectedProductForSale(null);
-    setSaleData({
-      quantity: '',
-      customerName: '',
-      notes: ''
-    });
+      // Recharger les données
+      loadProducts();
+      loadSales();
+
+      // Réinitialiser le formulaire
+      resetSaleForm();
+    } catch (error) {
+      console.error('Erreur lors de la vente:', error);
+      alert('Erreur lors de l\'enregistrement de la vente');
+    }
   };
 
   const resetSaleForm = () => {
@@ -268,6 +273,23 @@ function App() {
       notes: ''
     });
   };
+
+  // Affichage du loading
+  if (loading) {
+    return (
+      <div className="login-container">
+        <div className="login-card">
+          <div className="login-header">
+            <div className="login-icon">
+              <Package size={32} />
+            </div>
+            <h1>CosmeStock</h1>
+            <p>Chargement...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Si l'utilisateur n'est pas connecté, afficher le formulaire de login
   if (!isAuthenticated) {
@@ -286,14 +308,14 @@ function App() {
             <div className="form-group">
               <label>
                 <User size={18} />
-                Nom d'utilisateur
+                Email
               </label>
               <input
-                type="text"
+                type="email"
                 required
-                value={loginData.username}
-                onChange={(e) => setLoginData({...loginData, username: e.target.value})}
-                placeholder="Entrez votre nom d'utilisateur"
+                value={loginData.email}
+                onChange={(e) => setLoginData({...loginData, email: e.target.value})}
+                placeholder="Entrez votre email"
               />
             </div>
 
@@ -318,16 +340,10 @@ function App() {
               </div>
             )}
 
-            <button type="submit" className="login-btn">
+            <button type="submit" className="login-btn" disabled={loading}>
               Se connecter
             </button>
           </form>
-
-          <div className="login-demo">
-            <p><strong>Compte de démonstration :</strong></p>
-            <p>Utilisateur : <code>admin</code></p>
-            <p>Mot de passe : <code>cosmestock2024</code></p>
-          </div>
         </div>
       </div>
     );
@@ -612,13 +628,13 @@ function App() {
                 {sales.map(sale => (
                   <div key={sale.id} className="table-row">
                     <div className="sale-date">
-                      {new Date(sale.date).toLocaleDateString('fr-FR', {
+                      {sale.date && sale.date.toDate ? sale.date.toDate().toLocaleDateString('fr-FR', {
                         day: '2-digit',
                         month: '2-digit',
                         year: 'numeric',
                         hour: '2-digit',
                         minute: '2-digit'
-                      })}
+                      }) : 'Date inconnue'}
                     </div>
                     <div className="product-info">
                       <div>
